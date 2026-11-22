@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      # Testes unitários + testes SQL (RLS, RPC, imutabilidade) em PGlite.
+      - run: npm test
+      # Build com valores fictícios: o bundle nunca recebe segredos.
+      - run: npm run build
+        env:
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+      - run: npm run check:secrets
+      - name: Scripts de shell
+        run: |
+          shellcheck scripts/backup/*.sh scripts/restore-test/*.sh
+          bash -n scripts/backup/backup.sh scripts/backup/retention.sh scripts/restore-test/restore-test.sh
+
+  # Teste de concorrência e ciclo backup/restauro contra Postgres real (Supabase local, dados fictícios).
+  supabase-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - run: npm ci
+      - run: supabase db start
+      - run: supabase db reset
+      - name: Teste de concorrência (pg real)
+        run: npx vitest run tests/db/concurrency.test.ts
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      - name: Instalar age
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq age
+      - name: Backup e restauro de teste (chave efémera, dados fictícios, sem envio)
+        env:
+          SUPABASE_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+          BACKUP_INCLUDE_AUTH_USERS: 'true'
+          BACKUP_UPLOAD_ENABLED: 'false'
+        run: |
+          KEYDIR="$(mktemp -d)"
+          age-keygen -o "$KEYDIR/key.txt" 2>/dev/null
+          export BACKUP_ENCRYPTION_RECIPIENT="$(age-keygen -y "$KEYDIR/key.txt")"
+          ARCHIVE="$(bash scripts/backup/backup.sh)"
+          # O destino é o mesmo Postgres efémero do job, limpo antes do restauro (--reset-target).
+          RESTORE_DB_URL="postgresql://postgres:postgres@localhost:54322/postgres" \
+          RESTORE_TARGET_IS_DISPOSABLE=yes BACKUP_DECRYPTION_KEY_FILE="$KEYDIR/key.txt" \
+            bash scripts/restore-test/restore-test.sh "$ARCHIVE" --reset-target
+          rm -rf "$KEYDIR" backups

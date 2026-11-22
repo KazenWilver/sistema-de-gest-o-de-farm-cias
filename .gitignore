@@ -1,0 +1,32 @@
+# Dependências e builds
+node_modules/
+dist/
+dev-dist/
+coverage/
+*.tsbuildinfo
+
+# Segredos: nunca versionar
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.age
+age-key*.txt
+
+# Backups e dumps locais
+backups/
+*.sql.gz
+*.dump
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+
+# Editor e sistema
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log

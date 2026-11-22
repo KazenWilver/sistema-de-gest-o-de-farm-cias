@@ -1,0 +1,65 @@
+name: Backup
+
+# DESACTIVADO por defeito. O job só corre quando AMBAS as variáveis do repositório estiverem a "true":
+#   BACKUP_ENABLED          — credenciais preenchidas em GitHub Secrets e restauro testado
+#   LEGAL_TRANSFER_APPROVED — transferência internacional (runner GitHub + Cloudflare R2) validada
+#                             com jurista/APD (secção 10.5). Antes disso: só dados fictícios.
+# Segredos necessários (Settings > Secrets and variables > Actions), nunca no código:
+#   SUPABASE_DB_URL, BACKUP_ENCRYPTION_RECIPIENT (chave PÚBLICA age),
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+# A chave privada de desencriptação NUNCA é guardada no GitHub nem no bucket.
+
+on:
+  schedule:
+    - cron: '30 2 * * *' # 03:30 em Luanda (UTC+1)
+  workflow_dispatch:
+    inputs:
+      apply_retention:
+        description: Apagar cópias fora da política de retenção (senão só simula)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: vars.BACKUP_ENABLED == 'true' && vars.LEGAL_TRANSFER_APPROVED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: backup
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Instalar age
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq age
+      - name: Backup cifrado e envio
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_ENCRYPTION_RECIPIENT: ${{ secrets.BACKUP_ENCRYPTION_RECIPIENT }}
+          BACKUP_INCLUDE_AUTH_USERS: ${{ vars.BACKUP_INCLUDE_AUTH_USERS || 'false' }}
+          BACKUP_UPLOAD_ENABLED: 'true'
+          LEGAL_TRANSFER_APPROVED: ${{ vars.LEGAL_TRANSFER_APPROVED }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: bash scripts/backup/backup.sh
+      - name: Retenção (30 diárias + 12 mensais)
+        env:
+          LEGAL_TRANSFER_APPROVED: ${{ vars.LEGAL_TRANSFER_APPROVED }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: bash scripts/backup/retention.sh ${{ (github.event_name == 'schedule' || inputs.apply_retention) && '--apply' || '' }}
+      - name: Limpar ficheiros locais do runner
+        if: always()
+        run: rm -rf backups
+      # Falha do job = alerta: o GitHub notifica por email quem tem notificações de Actions activas.
